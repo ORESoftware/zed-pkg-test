@@ -1,0 +1,98 @@
+name: zed e2e (node + docker)
+on:
+  push:
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Prepare the Docker build context
+        run: |
+          mkdir -p "$RUNNER_TEMP/zed-docker-context"
+          git clone --depth 1 \
+            https://github.com/zed-pkg/zed-interfaces \
+            "$RUNNER_TEMP/zed-docker-context/zed-interfaces"
+          git clone --depth 1 \
+            https://github.com/zed-pkg/zed-cli \
+            "$RUNNER_TEMP/zed-docker-context/zed-cli"
+
+      - name: Build Node + zed test image
+        run: |
+          docker build \
+            --file .github/docker/Dockerfile \
+            --tag zed-pkg-test/node-e2e \
+            "$RUNNER_TEMP/zed-docker-context"
+
+      - name: Publish node-lib inside Docker
+        run: |
+          git clone --depth 1 \
+            https://github.com/zed-pkg-test/node-lib \
+            "$RUNNER_TEMP/node-lib"
+          mkdir -p "$RUNNER_TEMP/zed-registry" "$RUNNER_TEMP/zed-home"
+          docker run --rm \
+            --volume "$RUNNER_TEMP/node-lib:/package" \
+            --volume "$RUNNER_TEMP/zed-registry:/registry" \
+            --workdir /package \
+            zed-pkg-test/node-e2e \
+            zed publish --registry file:///registry --skip-vcs-checks
+
+      - name: Symlink install works with its store mounted
+        run: |
+          docker run --rm \
+            --volume "$GITHUB_WORKSPACE:/work" \
+            --volume "$RUNNER_TEMP/zed-registry:/registry:ro" \
+            --volume "$RUNNER_TEMP/zed-home:/zed-home" \
+            --workdir /work \
+            zed-pkg-test/node-e2e \
+            sh -euc '
+              zed install \
+                --registry file:///registry \
+                --home /zed-home \
+                --install-mode symlink
+              test -L .vendor/.zed/zed-pkg-test/node-lib
+              test -L node_modules/@zed-pkg-test/node-lib
+              node src/main.js
+            '
+
+      - name: Symlink install fails without its store mount
+        run: |
+          if docker run --rm \
+            --volume "$GITHUB_WORKSPACE:/work:ro" \
+            --workdir /work \
+            node:22-bookworm-slim \
+            node src/main.js
+          then
+            echo "expected the unmounted store-backed symlinks to fail"
+            exit 1
+          fi
+
+      - name: Frozen copy install contains no store symlinks
+        run: |
+          docker run --rm \
+            --volume "$GITHUB_WORKSPACE:/work" \
+            --volume "$RUNNER_TEMP/zed-registry:/registry:ro" \
+            --volume "$RUNNER_TEMP/zed-home:/zed-home" \
+            --workdir /work \
+            zed-pkg-test/node-e2e \
+            sh -euc '
+              zed install \
+                --frozen \
+                --registry file:///registry \
+                --home /zed-home \
+                --install-mode copy
+              test ! -L .vendor/.zed/zed-pkg-test/node-lib
+              test ! -L node_modules/@zed-pkg-test/node-lib
+              test -z "$(find .vendor/.zed node_modules/@zed-pkg-test -type l -print -quit)"
+              node src/main.js
+            '
+
+      - name: Copy install runs in a fresh Node container
+        run: |
+          docker run --rm \
+            --volume "$GITHUB_WORKSPACE:/work:ro" \
+            --workdir /work \
+            node:22-bookworm-slim \
+            node src/main.js
