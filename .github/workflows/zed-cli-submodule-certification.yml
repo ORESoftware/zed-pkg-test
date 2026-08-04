@@ -1,0 +1,103 @@
+name: Zed CLI submodule interoperability certification
+
+on:
+  pull_request:
+    branches:
+      - main
+    paths:
+      - zed-cli-ref.txt
+      - .github/workflows/zed-cli-submodule-certification.yml
+      - README.md
+  push:
+    branches:
+      - main
+    paths:
+      - zed-cli-ref.txt
+      - .github/workflows/zed-cli-submodule-certification.yml
+      - README.md
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: zed-cli-submodule-certification-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: "1"
+
+jobs:
+  focused-contract:
+    name: focused contract (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-latest
+          - macos-latest
+    steps:
+      - name: Check out certification inputs
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+
+      - name: Read and validate the immutable Zed CLI ref
+        id: zed-ref
+        shell: bash
+        run: |
+          set -euo pipefail
+          ref="$(tr -d '[:space:]' < zed-cli-ref.txt)"
+          if [[ ! "$ref" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "zed-cli-ref.txt must contain one full lowercase Git commit SHA" >&2
+            exit 2
+          fi
+          echo "sha=$ref" >> "$GITHUB_OUTPUT"
+
+      - name: Check out the exact Zed CLI commit
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          repository: zed-pkg/zed-cli
+          ref: ${{ steps.zed-ref.outputs.sha }}
+          path: zed-cli
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Verify checkout identity
+        working-directory: zed-cli
+        shell: bash
+        env:
+          EXPECTED_SHA: ${{ steps.zed-ref.outputs.sha }}
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
+
+      - name: Select stable Rust
+        shell: bash
+        run: |
+          set -euo pipefail
+          rustup toolchain install stable --profile minimal --no-self-update
+          rustup default stable
+
+      - name: Check formatting
+        working-directory: zed-cli
+        run: cargo fmt --all -- --check
+
+      - name: Run Git-submodule unit and real-binary contracts
+        working-directory: zed-cli
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo test --locked --lib \
+            --test git_submodule_interop \
+            --test git_submodule_interop_cli \
+            --test git_submodule_fresh_clone \
+            --test git_submodule_branch_provenance
+
+      - name: Run all-target Clippy
+        if: runner.os == 'Linux'
+        working-directory: zed-cli
+        run: cargo clippy --locked --all-targets -- -D warnings
