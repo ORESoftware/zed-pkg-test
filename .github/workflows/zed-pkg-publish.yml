@@ -2,63 +2,99 @@ name: Zed-Pkg Validation
 
 on:
   push:
-    branches: [ "main", "feat/*" ]
+    branches:
+      - main
+      - "feat/*"
   pull_request:
-    branches: [ "main" ]
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+concurrency:
+  group: zed-pkg-validation-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   validate:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
-      - name: Setup Python
-        uses: actions/setup-python@v4
+      - name: Check out repository
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
-          python-version: '3.11'
-      - name: Validate Zed Manifests
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@7f4fc3e22c37d6ff65e88745f38bd3157c663f7c
+        with:
+          python-version: "3.11"
+
+      - name: Validate Zed manifests
+        shell: bash
         run: |
-          python -c '
+          set -euo pipefail
+          python - <<'PY'
           import os
-          import tomllib
           import sys
+          import tomllib
 
+          skipped_directories = {".git", "target", "node_modules", ".claude", "tmp"}
           success = True
-          for root, dirs, files in os.walk("."):
-              # Skip build directories or .git
-              if any(skip in root for skip in [".git", "target", "node_modules", ".claude", "tmp"]):
+          manifest_count = 0
+
+          for root, directories, files in os.walk("."):
+              directories[:] = [
+                  directory
+                  for directory in directories
+                  if directory not in skipped_directories
+              ]
+              if ".zpkg.toml" not in files:
                   continue
-              if ".zpkg.toml" in files:
-                  path = os.path.join(root, ".zpkg.toml")
-                  print(f"Validating {path}...")
-                  try:
-                      with open(path, "rb") as f:
-                          data = tomllib.load(f)
-                      
-                      if "package" not in data and "workspace" not in data:
-                          print(f"  Error: {path} is missing [package] or [workspace]")
-                          success = False
-                          
-                      if "package" in data:
-                          pkg = data["package"]
-                          if not all(k in pkg for k in ("org", "name", "version")):
-                              print(f"  Error: {path} [package] is missing org, name, or version")
-                              success = False
-                          else:
-                              print(f"  Package OK: {pkg[\"org\"]}/{pkg[\"name\"]} v{pkg[\"version\"]}")
 
-                      if "workspace" in data:
-                          ws = data["workspace"]
-                          if "members" not in ws:
-                              print(f"  Error: {path} [workspace] is missing members")
-                              success = False
-                          else:
-                              print(f"  Workspace OK: members={ws[\"members\"]}")
+              manifest_count += 1
+              path = os.path.join(root, ".zpkg.toml")
+              print(f"Validating {path}...")
+              try:
+                  with open(path, "rb") as manifest_file:
+                      data = tomllib.load(manifest_file)
 
-                  except Exception as e:
-                      print(f"  Error parsing {path}: {e}")
+                  package = data.get("package")
+                  workspace = data.get("workspace")
+                  if package is None and workspace is None:
+                      print(f"  Error: {path} is missing [package] or [workspace]")
                       success = False
+
+                  if package is not None:
+                      if not isinstance(package, dict) or not all(
+                          key in package for key in ("org", "name", "version")
+                      ):
+                          print(
+                              f"  Error: {path} [package] is missing org, name, or version"
+                          )
+                          success = False
+                      else:
+                          print(
+                              "  Package OK: "
+                              f"{package['org']}/{package['name']} v{package['version']}"
+                          )
+
+                  if workspace is not None:
+                      if not isinstance(workspace, dict) or "members" not in workspace:
+                          print(f"  Error: {path} [workspace] is missing members")
+                          success = False
+                      else:
+                          print(f"  Workspace OK: members={workspace['members']}")
+              except Exception as error:
+                  print(f"  Error parsing {path}: {error}")
+                  success = False
+
+          if manifest_count == 0:
+              print("Error: no .zpkg.toml manifests found")
+              success = False
 
           if not success:
               sys.exit(1)
-          print("\nAll manifests are structurally valid.")
-          '
+          print(f"\nAll {manifest_count} manifest(s) are structurally valid.")
+          PY
