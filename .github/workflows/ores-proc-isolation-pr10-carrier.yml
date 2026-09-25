@@ -1,0 +1,49 @@
+name: ores-proc-isolation-cli PR 10 carrier
+
+on:
+  pull_request:
+    paths:
+      - .github/workflows/ores-proc-isolation-pr10-carrier.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  exact-head-proof:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out carrier
+        uses: actions/checkout@v4
+
+      - name: Check out exact ores-proc-isolation-cli head
+        uses: actions/checkout@v4
+        with:
+          repository: ORESoftware/ores-proc-isolation-cli
+          ref: dc024eddb29b95dba5e22e0fcaef7b7d57a2bb06
+          path: source
+          persist-credentials: false
+
+      - name: Assert exact source head
+        working-directory: source
+        run: |
+          test "$(git rev-parse HEAD)" = "dc024eddb29b95dba5e22e0fcaef7b7d57a2bb06"
+
+      - name: Install Rust components
+        run: rustup component add rustfmt clippy
+
+      - name: Format check
+        working-directory: source
+        run: cargo fmt --all -- --check
+
+      - name: NixOS trusted-helper contract
+        working-directory: source
+        run: cargo test --locked --test nixos_trusted_helper_contract
+
+      - name: Full Rust tests
+        working-directory: source
+        run: cargo test --locked --all-targets
+
+      - name: Clippy
+        working-directory: source
+        run: cargo clippy --locked --all-targets -- -D warnings
